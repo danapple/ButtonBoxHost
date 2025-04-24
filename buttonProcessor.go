@@ -61,21 +61,8 @@ func buttonProcessor(inChan <-chan byte, outChan chan<- byte, wg *sync.WaitGroup
 }
 
 func convertButtonToLed(button byte) byte {
-	var led byte = 0
 
-	switch button {
-	case WHITE_BUTTON:
-		led = WHITE_BUTTON_LED
-	case GREEN_BUTTON:
-		led = GREEN_BUTTON_LED
-	case YELLOW_BUTTON:
-		led = YELLOW_BUTTON_LED
-	case RED_BUTTON:
-		led = RED_BUTTON_LED
-	case SQUARE_BUTTON:
-		led = SQUARE_BUTTON_LED
-	default:
-		led = 0
-	}
+	var led = BUTTON_LED_RELATIONS[button]
+
 	return led
 }
