@@ -2,31 +2,52 @@ package main
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
 	"go.bug.st/serial"
 )
 
-func portManager(portName string, inChan chan byte, outChan chan byte, ctx context.Context, wg *sync.WaitGroup) {
+type PortManager struct {
+	logger    *zerolog.Logger
+	portName  string
+	inChan    chan byte
+	outChan   chan byte
+	waitGroup *sync.WaitGroup
+}
+
+func NewPortManager(logger *zerolog.Logger, portName string, inChan chan byte, outChan chan byte, waitGroup *sync.WaitGroup) *PortManager {
+	return &PortManager{
+		logger:    ptr(logger.With().Str(LogKey.Module, "PortManager").Logger()),
+		portName:  portName,
+		waitGroup: waitGroup,
+		inChan:    inChan,
+		outChan:   outChan,
+	}
+}
+
+func (pm *PortManager) Start(ctx context.Context) {
+	pm.waitGroup.Add(1)
+	go pm.loop(ctx)
+}
+
+func (pm *PortManager) loop(ctx context.Context) {
 	var errorShown = false
+	defer pm.waitGroup.Done()
 
 	for {
-
-		port, err := openPort(portName)
+		port, err := openPort(pm.portName)
 		if port == nil {
 			if !errorShown {
-				log.Printf("Failed opening port '%v': '%v'", portName, err)
+				pm.logger.Error().Msgf("Failed opening port '%v'", err)
 				errorShown = true
 			}
-			//log.Printf("portManager selecting\n")
 
 			select {
 			case <-ctx.Done():
 				{
-					log.Printf("Stopping portManager\n")
-					wg.Done()
+					pm.logger.Info().Msg("Stopping")
 					return
 				}
 			case <-time.After(500 * time.Millisecond):
@@ -36,7 +57,7 @@ func portManager(portName string, inChan chan byte, outChan chan byte, ctx conte
 			continue
 		}
 		if errorShown {
-			log.Printf("Opened port '%v'", portName)
+			pm.logger.Info().Msg("Opened port")
 			errorShown = false
 		}
 
@@ -45,11 +66,10 @@ func portManager(portName string, inChan chan byte, outChan chan byte, ctx conte
 
 		waitChan := make(chan bool)
 		var portManagerWaitGroup sync.WaitGroup
-		portManagerWaitGroup.Add(4)
-		go writer(outChan, port, &portManagerWaitGroup, portContext)
-		go reader(inChan, port, &portManagerWaitGroup, portCancel)
-		go heartbeat(outChan, &portManagerWaitGroup, portContext)
-		go buttonProcessor(inChan, outChan, &portManagerWaitGroup, portContext)
+		portManagerWaitGroup.Add(3)
+		go pm.writer(port, &portManagerWaitGroup, portContext)
+		go pm.reader(port, &portManagerWaitGroup, portCancel)
+		go pm.heartbeat(portContext)
 		go func() {
 			portManagerWaitGroup.Wait()
 			waitChan <- true
@@ -57,65 +77,92 @@ func portManager(portName string, inChan chan byte, outChan chan byte, ctx conte
 		select {
 		case <-ctx.Done():
 			{
-				log.Printf("portManager canceling jobs on port\n")
+				pm.logger.Info().Msg("portManager canceling jobs")
 				portCancel()
-				port.Close()
+				err := port.Close()
+				if err != nil {
+					pm.logger.Error().Msgf("Error closing port '%v'", err)
+				}
 				portManagerWaitGroup.Wait()
-				log.Printf("portManager done\n")
-				wg.Done()
+				pm.logger.Info().Msg("portManager done")
 				return
 			}
 		case <-waitChan:
 			{
-				log.Printf("portManager looping\n")
+				pm.logger.Info().Msg("portManager looping")
 			}
 		}
 	}
 }
 
-func writer(outChan <-chan byte, port serial.Port, wg *sync.WaitGroup, ctx context.Context) {
+func (pm *PortManager) writer(port serial.Port, wg *sync.WaitGroup, ctx context.Context) {
 	buff := make([]byte, 1)
 	defer wg.Done()
 
 	for {
 		select {
-		case toWrite, more := <-outChan:
+		case toWrite, more := <-pm.outChan:
 			{
 				if !more {
 					return
 				}
 				buff[0] = toWrite
-				port.Write(buff)
-				//log.Printf("Writing byte '%v'\n", toWrite)
+				_, err := port.Write(buff)
+				if err != nil {
+					pm.logger.Error().Msgf("Failed writing to port '%v'", err)
+					return
+				}
+				pm.logger.Trace().Msgf("Wrote byte '%v'", toWrite)
 			}
 		case <-ctx.Done():
 			{
-				log.Printf("Writer done")
+				pm.logger.Info().Msg("Writer done")
 				return
 			}
 		}
 	}
 }
 
-func reader(inChan chan<- byte, port serial.Port, wg *sync.WaitGroup, portCancel context.CancelFunc) {
+func (pm *PortManager) reader(port serial.Port, wg *sync.WaitGroup, portCancel context.CancelFunc) {
 	buff := make([]byte, 100)
 	defer wg.Done()
 
 	for {
 		n, err := port.Read(buff)
 		if n == 0 {
-			log.Printf("0 bytes to read, done reading\n")
+			pm.logger.Info().Msg("0 bytes to read, done reading\n")
 			portCancel()
 			return
 		}
 		if err != nil {
-			//log.Printf("Got error '%v', done reading\n", err)
+			//pm.logger.Info().Msg("Got error '%v', done reading\n", err)
 			return
 		}
 		for i := 0; i < n; i++ {
 			element := buff[i]
-			//log.Printf("Received '%v'", element)
-			inChan <- element
+			//pm.logger.Info().Msg("Received '%v'", element)
+			pm.inChan <- element
+		}
+	}
+}
+
+func (pm *PortManager) heartbeat(ctx context.Context) {
+	defer func() { recover() }()
+
+	pm.logger.Info().Msg("Heartbeat starting")
+
+	for {
+		select {
+		case <-ctx.Done():
+			{
+				pm.logger.Info().Msg("Heartbeat done")
+				pm.waitGroup.Done()
+				return
+			}
+		case <-time.After(200 * time.Millisecond):
+			{
+				pm.outChan <- 255
+			}
 		}
 	}
 }

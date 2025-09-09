@@ -2,51 +2,60 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+
+	"github.com/rs/zerolog/log"
 )
 
 func main() {
+
+	rootLogger := ptr(log.With().Logger())
+
+	if len(os.Args) < 2 {
+		rootLogger.Fatal().Msg("No port name provided")
+	}
+
 	var argsWithoutProg = os.Args[1:]
 	var portName = argsWithoutProg[0]
 
-	fmt.Printf("Starting ButtonBox host processor on serial port '%v'\n", portName)
-
-	outChan := make(chan byte, 10)
-	inChan := make(chan byte, 10)
+	rootLogger = ptr(rootLogger.With().Str(LogKey.Port, portName).Logger())
+	logger := ptr(rootLogger.With().Str(LogKey.Module, "Main").Logger())
+	logger.Info().Msg("Starting host processor")
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go portManager(portName, inChan, outChan, ctx, &wg)
-	go restApi(outChan, &wg)
+	inChan := make(chan byte, 10)
+	outChan := make(chan byte, 10)
+
+	waitGroup := &sync.WaitGroup{}
+
+	portManager := NewPortManager(rootLogger, portName, inChan, outChan, waitGroup)
+	portManager.Start(ctx)
+
+	restAPI := NewRestApi(rootLogger, inChan, outChan, waitGroup)
+	restAPI.Start(ctx)
+
+	buttonProcessor := NewButtonProcessor(rootLogger, inChan, outChan, waitGroup)
+	buttonProcessor.Start(ctx)
 
 	waitForSignal()
-
 	cancel()
-	shutdownRestApi()
-	close(outChan)
+	waitGroup.Wait()
+
 	close(inChan)
-
-	wg.Wait()
-	log.Printf("Done")
-
+	close(outChan)
+	logger.Info().Msg("Done")
 }
 
 func waitForSignal() {
-
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-
 	for {
-		signal := <-signals
-
-		switch signal {
+		sig := <-signals
+		switch sig {
 		case syscall.SIGINT:
 			return
 		case syscall.SIGTERM:

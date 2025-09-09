@@ -2,25 +2,46 @@ package main
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"regexp"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 var httpServer http.Server
-var outChan chan<- byte
 
 var (
 	LedControl = regexp.MustCompile(`^/led/(.*)$`)
 )
 
-func restApi(outChanNew chan<- byte, wg *sync.WaitGroup) {
-	defer wg.Done()
+type RestAPI struct {
+	logger    *zerolog.Logger
+	inChan    chan byte
+	outChan   chan byte
+	waitGroup *sync.WaitGroup
+}
 
-	outChan = outChanNew
+func NewRestApi(logger *zerolog.Logger, inChan chan byte, outChan chan byte, waitGroup *sync.WaitGroup) *RestAPI {
+	return &RestAPI{
+		logger:    ptr(logger.With().Str(LogKey.Module, "RestAPI").Logger()),
+		inChan:    inChan,
+		outChan:   outChan,
+		waitGroup: waitGroup,
+	}
+}
+
+func (api *RestAPI) Start(ctx context.Context) {
+	api.waitGroup.Add(1)
+
+	go api.listen()
+	go api.waitForCancel(ctx)
+}
+
+func (api *RestAPI) listen() {
+	defer api.waitGroup.Done()
 
 	mux := http.NewServeMux()
 
@@ -32,40 +53,57 @@ func restApi(outChanNew chan<- byte, wg *sync.WaitGroup) {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	mux.Handle("/", &homeHandler{})
-	mux.Handle("/led/", &ledHandler{})
+	mux.Handle("/", &homeHandler{
+		logger: api.logger,
+	})
+	mux.Handle("/led/", &ledHandler{
+		logger:  api.logger,
+		outChan: api.outChan,
+	})
+	api.logger.Info().Msgf("Listening")
 
-	httpServer.ListenAndServe()
-	log.Printf("Rest API http done\n")
-
+	err := httpServer.ListenAndServe()
+	api.logger.Info().Msgf("Done: %v", err)
 }
 
-func shutdownRestApi() {
+func (api *RestAPI) waitForCancel(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		{
+			api.logger.Info().Msg("Stopping")
+			api.stop()
+			return
+		}
+	}
+}
+
+func (api *RestAPI) stop() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	log.Printf("Shutting down rest API")
+	api.logger.Info().Msg("Shutting down")
 	var err = httpServer.Shutdown(ctx)
 	if err != nil {
-		log.Printf("HTTP server shutdown error: %s\n", err)
+		api.logger.Error().Msgf("HTTP server shutdown error: %s", err)
 	}
-	log.Printf("Finished shutting down rest API\n")
-
+	api.logger.Info().Msg("Finished shutting down")
 }
 
-type ledHandler struct{}
+type ledHandler struct {
+	logger  *zerolog.Logger
+	outChan chan byte
+}
 
-func (h *ledHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	log.Printf("ledHandler\n")
+func (lh *ledHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	lh.logger.Info().Msg("ledHandler")
 
 	switch {
 	case r.Method == http.MethodGet:
-		handleLedPost(w, r)
-
+		lh.handleLedPost(w, r)
 	}
 }
 
-func handleLedPost(w http.ResponseWriter, r *http.Request) {
-	log.Printf("handleLedPost\n")
+func (lh *ledHandler) handleLedPost(w http.ResponseWriter, r *http.Request) {
+	lh.logger.Info().Msg("handleLedPost")
 
 	var matches = LedControl.FindStringSubmatch(r.URL.Path)
 	if len(matches) > 0 {
@@ -75,12 +113,18 @@ func handleLedPost(w http.ResponseWriter, r *http.Request) {
 			// ... handle error
 			panic(err)
 		}
-		outChan <- byte(ledNumber)
+		lh.outChan <- byte(ledNumber)
 	}
 }
 
-type homeHandler struct{}
+type homeHandler struct {
+	logger *zerolog.Logger
+}
 
-func (h *homeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("This is my new home page"))
+func (hh *homeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	_, err := w.Write([]byte("ButtonBox Home Page"))
+	if err != nil {
+		hh.logger.Error().Msgf("Write failed: %v", err)
+		return
+	}
 }
