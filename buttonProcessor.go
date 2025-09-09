@@ -2,39 +2,50 @@ package main
 
 import (
 	"context"
-	"log"
 	"sync"
+
+	"github.com/rs/zerolog"
 )
 
-var buttonStates = make([]bool, 100)
-
-func initLeds() {
-	for _, buttonPinNumber := range BUTTONS {
-		led := convertButtonToLed(buttonPinNumber)
-		if !buttonStates[buttonPinNumber] {
-			led |= 0x80
-		}
-		outChan <- led
-	}
+type ButtonProcessor struct {
+	logger       *zerolog.Logger
+	inChan       chan byte
+	outChan      chan byte
+	waitGroup    *sync.WaitGroup
+	buttonStates []bool
 }
 
-func buttonProcessor(inChan <-chan byte, outChan chan<- byte, wg *sync.WaitGroup, ctx context.Context) {
-	defer wg.Done()
-	log.Printf("buttonProcessor starting\n")
+func NewButtonProcessor(logger *zerolog.Logger, inChan chan byte, outChan chan byte, waitGroup *sync.WaitGroup) *ButtonProcessor {
+	return &ButtonProcessor{
+		logger:       ptr(logger.With().Str(LogKey.Module, "ButtonProcessor").Logger()),
+		inChan:       inChan,
+		outChan:      outChan,
+		waitGroup:    waitGroup,
+		buttonStates: make([]bool, 100),
+	}
+}
+func (bp *ButtonProcessor) Start(ctx context.Context) {
+	bp.waitGroup.Add(1)
+	go bp.loop(ctx)
+}
 
-	initLeds()
+func (bp *ButtonProcessor) loop(ctx context.Context) {
+	defer bp.waitGroup.Done()
+	bp.logger.Info().Msg("Starting")
+
+	bp.initLEDs()
 
 	for {
 		select {
 		case <-ctx.Done():
 			{
-				log.Printf("buttonProcessor Done\n")
+				bp.logger.Info().Msg("Done")
 				return
 			}
-		case readByte, more := <-inChan:
+		case readByte, more := <-bp.inChan:
 			{
 				if !more {
-					log.Printf("buttonProcessor no more\n")
+					bp.logger.Info().Msg("No more\n")
 					return
 				}
 				var led byte = 0
@@ -49,14 +60,24 @@ func buttonProcessor(inChan <-chan byte, outChan chan<- byte, wg *sync.WaitGroup
 				if led == 0 {
 					continue
 				}
-				newState := !buttonStates[button]
+				newState := !bp.buttonStates[button]
 				if !newState {
 					led |= 0x80
 				}
-				buttonStates[button] = newState
-				outChan <- led
+				bp.buttonStates[button] = newState
+				bp.outChan <- led
 			}
 		}
+	}
+}
+
+func (bp *ButtonProcessor) initLEDs() {
+	for _, buttonPinNumber := range BUTTONS {
+		led := convertButtonToLed(buttonPinNumber)
+		if !bp.buttonStates[buttonPinNumber] {
+			led |= 0x80
+		}
+		bp.outChan <- led
 	}
 }
 
