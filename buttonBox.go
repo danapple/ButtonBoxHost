@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"os"
 	"os/signal"
 	"sync"
@@ -14,12 +15,14 @@ func main() {
 
 	rootLogger := ptr(log.With().Logger())
 
-	if len(os.Args) < 2 {
+	portArg := flag.String("port", "", "Serial port to open")
+	flag.Parse()
+
+	if *portArg == "" {
 		rootLogger.Fatal().Msg("No port name provided")
 	}
 
-	var argsWithoutProg = os.Args[1:]
-	var portName = argsWithoutProg[0]
+	var portName = *portArg
 
 	rootLogger = ptr(rootLogger.With().Str(LogKey.Port, portName).Logger())
 	logger := ptr(rootLogger.With().Str(LogKey.Module, "Main").Logger())
